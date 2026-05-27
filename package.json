@@ -1,0 +1,22 @@
+{
+  "name": "@agiterra/slack-tools",
+  "version": "0.1.0",
+  "description": "Slack webhook lifecycle helpers + MCP tools — agent-scoped firehose (1 Slack app per persona), agent-side filtering via webhooks.filter.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src/"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@agiterra/wire-tools": "agiterra/wire-tools#v2.0.0"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  },
+  "license": "MIT",
+  "author": "Tim Garthwaite <https://github.com/mividtim>"
+}

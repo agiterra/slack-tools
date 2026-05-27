@@ -1,0 +1,228 @@
+#!/usr/bin/env bun
+/**
+ * Slack MCP server — runtime-agnostic adapter.
+ *
+ * Tools:
+ *   register_slack_app   — wire up a Slack app's events to land on the
+ *                          calling agent's channel. Returns the Request
+ *                          URL to paste into api.slack.com.
+ *   unregister_webhook   — tear down a registration by wire webhook id.
+ *   post_message         — chat.postMessage with optional thread_ts/blocks.
+ *   add_reaction         — reactions.add.
+ *
+ * Config env vars:
+ *   WIRE_URL             default http://localhost:9800
+ *   WIRE_EXTERNAL_URL    externally-reachable Wire URL (e.g. ngrok)
+ *   AGENT_ID             required
+ *   AGENT_PRIVATE_KEY    Ed25519 PKCS8 base64 (required for Wire API auth)
+ *   SLACK_BOT_TOKEN      default Slack bot token for outbound calls
+ *   SLACK_SIGNING_SECRET default Slack app signing secret (validator key)
+ */
+
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import { buildSlackWebhook } from "./webhooks.js";
+import { postMessage, addReaction } from "./api.js";
+import { createAuthJwt, importPrivateKey } from "@agiterra/wire-tools";
+
+const WIRE_URL = process.env.WIRE_URL ?? "http://localhost:9800";
+const WIRE_EXTERNAL_URL = process.env.WIRE_EXTERNAL_URL ?? WIRE_URL;
+const AGENT_ID = process.env.AGENT_ID ?? "";
+const DEFAULT_BOT_TOKEN = process.env.SLACK_BOT_TOKEN ?? "";
+const DEFAULT_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET ?? "";
+
+let signingKey: CryptoKey | null = null;
+
+const mcp = new Server(
+  { name: "slack", version: "0.1.0" },
+  { capabilities: { tools: {} } },
+);
+
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: "register_slack_app",
+      description:
+        "Register this agent's Slack app event subscription with Wire. Returns the Request URL to paste into the Slack app's Event Subscriptions config at api.slack.com. The Slack app itself (bot user, scopes, install to workspace) must be created manually one time per persona. Once the Request URL is set, all events the bot can see arrive as `webhook.slack` channel messages on this agent.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          workspace: {
+            type: "string",
+            description: "Workspace label — used in the URL path and as the event source attribute. e.g. 'mivid-studios'.",
+          },
+          signing_secret: {
+            type: "string",
+            description: "Slack app Signing Secret. Defaults to SLACK_SIGNING_SECRET env var.",
+          },
+          filter: {
+            type: "string",
+            description: "Optional JS filter expression evaluated per delivery; null = pure firehose. Receives {headers, payload} and returns truthy to deliver. Example: 'payload.event?.user !== \"U_BOT_ID\"' to drop the bot's own messages.",
+          },
+          session_id: {
+            type: "string",
+            description: "Optional session_id to scope this webhook to the current session — wire purges it the moment the session ends. Default = agent-scoped (persists across sessions).",
+          },
+        },
+        required: ["workspace"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "unregister_webhook",
+      description: "Delete a Wire webhook registration by id. Useful for tearing down a Slack app's event subscription.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          webhook_id: { type: "number", description: "Wire webhook id." },
+          agent_id: { type: "string", description: "Optional. Owning agent id; defaults to caller." },
+        },
+        required: ["webhook_id"],
+      },
+    },
+    {
+      name: "post_message",
+      description: "Post a message to a Slack channel, DM, or thread (chat.postMessage).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          channel: { type: "string", description: "Channel id, user id (DM), or channel name." },
+          text: { type: "string", description: "Message text (fallback when blocks are used)." },
+          thread_ts: { type: "string", description: "Optional parent message ts to reply into." },
+          blocks: { type: "array", description: "Optional Block Kit blocks." },
+          bot_token: { type: "string", description: "Slack bot token; defaults to SLACK_BOT_TOKEN env." },
+        },
+        required: ["channel", "text"],
+      },
+    },
+    {
+      name: "add_reaction",
+      description: "Add an emoji reaction to a message (reactions.add).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          channel: { type: "string" },
+          ts: { type: "string", description: "Message timestamp returned by post_message." },
+          name: { type: "string", description: "Emoji name without colons. e.g. 'thumbsup'." },
+          bot_token: { type: "string", description: "Slack bot token; defaults to SLACK_BOT_TOKEN env." },
+        },
+        required: ["channel", "ts", "name"],
+      },
+    },
+  ],
+}));
+
+async function wirePost(path: string, body: string): Promise<Response> {
+  if (!signingKey) throw new Error("no signing key — Wire auth disabled");
+  const token = await createAuthJwt(signingKey, AGENT_ID, body);
+  return fetch(`${WIRE_URL}${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body,
+  });
+}
+
+async function wireDelete(path: string): Promise<Response> {
+  if (!signingKey) throw new Error("no signing key — Wire auth disabled");
+  const body = "{}";
+  const token = await createAuthJwt(signingKey, AGENT_ID, body);
+  return fetch(`${WIRE_URL}${path}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body,
+  });
+}
+
+mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+  const { name, arguments: args } = req.params;
+  const a = (args ?? {}) as Record<string, unknown>;
+
+  try {
+    if (name === "register_slack_app") {
+      const signingSecret = (a.signing_secret as string) || DEFAULT_SIGNING_SECRET;
+      if (!signingSecret) throw new Error("no Slack signing secret — set SLACK_SIGNING_SECRET or pass signing_secret param");
+
+      const reg = buildSlackWebhook({
+        agentId: AGENT_ID,
+        workspace: a.workspace as string,
+        signingSecret,
+        filter: a.filter as string | undefined,
+        sessionId: a.session_id as string | undefined,
+      });
+
+      const wireRes = await wirePost(`/agents/${AGENT_ID}/webhooks`, JSON.stringify(reg.wireBody));
+      if (!wireRes.ok) throw new Error(`Wire registration failed (${wireRes.status}): ${await wireRes.text()}`);
+      const { webhook_id } = (await wireRes.json()) as { webhook_id: number };
+
+      const requestUrl = reg.requestUrl(WIRE_EXTERNAL_URL);
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Slack webhook registered: wire id ${webhook_id}\nRequest URL (paste into api.slack.com → Event Subscriptions): ${requestUrl}`,
+        }],
+      };
+    }
+
+    if (name === "unregister_webhook") {
+      const webhookId = a.webhook_id as number;
+      if (!webhookId) throw new Error("missing webhook_id");
+      const ownerId = (a.agent_id as string | undefined) ?? AGENT_ID;
+      const res = await wireDelete(`/agents/${ownerId}/webhooks/${webhookId}`);
+      if (!res.ok) throw new Error(`Wire deletion failed (${res.status}): ${await res.text()}`);
+      return {
+        content: [{ type: "text" as const, text: `Webhook ${webhookId} deleted (owner=${ownerId})` }],
+      };
+    }
+
+    if (name === "post_message") {
+      const botToken = (a.bot_token as string) || DEFAULT_BOT_TOKEN;
+      if (!botToken) throw new Error("no Slack bot token — set SLACK_BOT_TOKEN or pass bot_token param");
+      const result = await postMessage({
+        botToken,
+        channel: a.channel as string,
+        text: a.text as string,
+        threadTs: a.thread_ts as string | undefined,
+        blocks: a.blocks as unknown[] | undefined,
+      });
+      return {
+        content: [{ type: "text" as const, text: `posted to ${result.channel} ts=${result.ts}` }],
+      };
+    }
+
+    if (name === "add_reaction") {
+      const botToken = (a.bot_token as string) || DEFAULT_BOT_TOKEN;
+      if (!botToken) throw new Error("no Slack bot token — set SLACK_BOT_TOKEN or pass bot_token param");
+      await addReaction(botToken, a.channel as string, a.ts as string, a.name as string);
+      return { content: [{ type: "text" as const, text: `reaction :${a.name}: added` }] };
+    }
+
+    throw new Error(`unknown tool: ${name}`);
+  } catch (e) {
+    const err = e as Error;
+    return {
+      content: [{ type: "text" as const, text: `${name} failed: ${err.message}` }],
+      isError: true,
+    };
+  }
+});
+
+export async function startServer(): Promise<void> {
+  const rawKey = process.env.AGENT_PRIVATE_KEY;
+  if (!rawKey) {
+    console.error("[slack] no private key — Wire auth disabled");
+  } else {
+    signingKey = await importPrivateKey(rawKey);
+  }
+
+  if (!AGENT_ID) console.error("[slack] no AGENT_ID — tools will fail");
+  if (!DEFAULT_BOT_TOKEN) console.error("[slack] no SLACK_BOT_TOKEN — agents must pass bot_token param");
+  if (!DEFAULT_SIGNING_SECRET) console.error("[slack] no SLACK_SIGNING_SECRET — agents must pass signing_secret param on register");
+
+  const transport = new StdioServerTransport();
+  await mcp.connect(transport);
+  console.error(`[slack] ready (agent=${AGENT_ID})`);
+}
