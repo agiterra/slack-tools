@@ -3,6 +3,8 @@ export {
   type SlackValidatorOptions,
 } from "./validator.js";
 
+export { buildSlackResponder } from "./responder.js";
+
 export {
   buildSlackWebhook,
   type SlackWebhookOptions,

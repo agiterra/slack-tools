@@ -13,12 +13,9 @@
  * `webhook.slack` for the agent's channel routing — agent-side filtering
  * (webhooks.filter) is the noise gate.
  *
- * Note: URL-verification handshakes (Slack pings new event URLs once with
- * `type: "url_verification"`, expecting the `challenge` field echoed back)
- * need wire-side support for the validator to return a direct HTTP body.
- * The current validator contract is pass/fail + source/topic only. Until
- * wire supports `respond_with`, run app-config validation manually OR add
- * a `?challenge=...` query-handler path. Tracked as an upstream issue.
+ * The URL verification handshake is handled by the companion
+ * `buildSlackResponder()` (runs after this validator passes, on wire's
+ * webhooks.responder hook — wire v1.13.0+).
  */
 
 export interface SlackValidatorOptions {

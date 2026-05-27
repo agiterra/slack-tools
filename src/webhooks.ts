@@ -12,6 +12,7 @@
  */
 
 import { buildSlackValidator } from "./validator.js";
+import { buildSlackResponder } from "./responder.js";
 
 export interface SlackWebhookOptions {
   /** Caller's wire agent id (the persona). */
@@ -36,6 +37,7 @@ export interface SlackWebhookRegistration {
     plugin: string;
     name: string;
     validator: string;
+    responder: string;
     secrets: { signing_secret: string };
     filter?: string;
     session_id?: string;
@@ -50,6 +52,7 @@ export function buildSlackWebhook(opts: SlackWebhookOptions): SlackWebhookRegist
       plugin: "slack",
       name: opts.workspace,
       validator: buildSlackValidator({ workspace: opts.workspace }),
+      responder: buildSlackResponder(),
       secrets: { signing_secret: opts.signingSecret },
       ...(opts.filter ? { filter: opts.filter } : {}),
       ...(opts.sessionId ? { session_id: opts.sessionId } : {}),
