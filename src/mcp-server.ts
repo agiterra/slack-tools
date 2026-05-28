@@ -34,6 +34,7 @@ const WIRE_EXTERNAL_URL = process.env.WIRE_EXTERNAL_URL ?? WIRE_URL;
 const AGENT_ID = process.env.AGENT_ID ?? "";
 const DEFAULT_BOT_TOKEN = process.env.SLACK_BOT_TOKEN ?? "";
 const DEFAULT_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET ?? "";
+const BOT_USER_ID = process.env.SLACK_BOT_USER_ID ?? "";
 
 let signingKey: CryptoKey | null = null;
 
@@ -61,7 +62,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           filter: {
             type: "string",
-            description: "Optional JS filter expression evaluated per delivery; null = pure firehose. Receives {headers, payload} and returns truthy to deliver. Example: 'payload.event?.user !== \"U_BOT_ID\"' to drop the bot's own messages.",
+            description: "Optional JS filter expression evaluated per delivery. Receives {headers, payload} and returns truthy to deliver. Example: 'payload.event?.user !== \"U_BOT_ID\"' to drop the bot's own messages.\n\nIf omitted AND SLACK_BOT_USER_ID env is set, defaults to dropping the bot's own outgoing messages (self-echo). Pass an explicit expression to override. Pass 'true' for a pure firehose.",
           },
           session_id: {
             type: "string",
@@ -146,11 +147,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       const signingSecret = (a.signing_secret as string) || DEFAULT_SIGNING_SECRET;
       if (!signingSecret) throw new Error("no Slack signing secret — set SLACK_SIGNING_SECRET or pass signing_secret param");
 
+      // Default to a self-echo filter if the caller didn't supply one and
+      // we have the bot's user id in env. Without this, every agent that
+      // posts to Slack via post_message sees its own message echoed back as
+      // an inbound event — a trap every operator independently rediscovers.
+      // Substitute the user_id literal so the filter sandbox doesn't need
+      // process.env access.
+      let filter = a.filter as string | undefined;
+      let filterSource: string | null = null;
+      if (filter) {
+        filterSource = "caller-supplied";
+      } else if (BOT_USER_ID) {
+        filter = `payload.event?.user !== "${BOT_USER_ID}"`;
+        filterSource = `defaulted to self-echo filter (SLACK_BOT_USER_ID=${BOT_USER_ID})`;
+      }
+
       const reg = buildSlackWebhook({
         agentId: AGENT_ID,
         workspace: a.workspace as string,
         signingSecret,
-        filter: a.filter as string | undefined,
+        filter,
         sessionId: a.session_id as string | undefined,
       });
 
@@ -159,10 +175,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       const { webhook_id } = (await wireRes.json()) as { webhook_id: number };
 
       const requestUrl = reg.requestUrl(WIRE_EXTERNAL_URL);
+      const filterLine = filterSource ? `\nFilter: ${filterSource}` : "\nFilter: none (pure firehose — set SLACK_BOT_USER_ID env to default a self-echo filter)";
       return {
         content: [{
           type: "text" as const,
-          text: `Slack webhook registered: wire id ${webhook_id}\nRequest URL (paste into api.slack.com → Event Subscriptions): ${requestUrl}`,
+          text: `Slack webhook registered: wire id ${webhook_id}\nRequest URL (paste into api.slack.com → Event Subscriptions): ${requestUrl}${filterLine}`,
         }],
       };
     }
