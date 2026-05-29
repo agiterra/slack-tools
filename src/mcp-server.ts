@@ -17,6 +17,13 @@
  *   AGENT_PRIVATE_KEY    Ed25519 PKCS8 base64 (required for Wire API auth)
  *   SLACK_BOT_TOKEN      default Slack bot token for outbound calls
  *   SLACK_SIGNING_SECRET default Slack app signing secret (validator key)
+ *   SLACK_WORKSPACE      this persona's workspace label — single source of
+ *                        truth for the webhook identity. When set (with
+ *                        AGENT_ID + SLACK_SIGNING_SECRET) the server
+ *                        idempotently re-registers its webhook on boot to
+ *                        self-heal a swept/dropped registration.
+ *   SLACK_BOT_USER_ID    when set, register_slack_app defaults to a
+ *                        self-echo filter dropping the bot's own messages.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -34,6 +41,7 @@ const WIRE_EXTERNAL_URL = process.env.WIRE_EXTERNAL_URL ?? WIRE_URL;
 const AGENT_ID = process.env.AGENT_ID ?? "";
 const DEFAULT_BOT_TOKEN = process.env.SLACK_BOT_TOKEN ?? "";
 const DEFAULT_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET ?? "";
+const DEFAULT_WORKSPACE = process.env.SLACK_WORKSPACE ?? "";
 const BOT_USER_ID = process.env.SLACK_BOT_USER_ID ?? "";
 
 let signingKey: CryptoKey | null = null;
@@ -48,13 +56,13 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "register_slack_app",
       description:
-        "Register this agent's Slack app event subscription with Wire. Returns the Request URL to paste into the Slack app's Event Subscriptions config at api.slack.com. The Slack app itself (bot user, scopes, install to workspace) must be created manually one time per persona. Once the Request URL is set, all events the bot can see arrive as `webhook.slack` channel messages on this agent.",
+        "Register this agent's Slack app event subscription with Wire. Returns the Request URL to paste into the Slack app's Event Subscriptions config at api.slack.com. The Slack app itself (bot user, scopes, install to workspace) must be created manually one time per persona. Once the Request URL is set, all events the bot can see arrive as `webhook.slack` channel messages on this agent.\n\nRegistration is idempotent: if the webhook already exists it is left untouched and reported as already-registered, so this is safe to call repeatedly. Under normal circumstances OMIT the workspace param — it is read from the SLACK_WORKSPACE env var, which is the single source of truth that the on-boot self-heal also uses. Passing an explicit workspace risks registering a SECOND webhook under a different label that diverges from the one the server heals on boot.",
       inputSchema: {
         type: "object" as const,
         properties: {
           workspace: {
             type: "string",
-            description: "Workspace label — used in the URL path and as the event source attribute. e.g. 'mivid-studios'.",
+            description: "Workspace label — used in the URL path and as the event source attribute, e.g. 'mivid-studios'. OMIT under normal circumstances: defaults to the SLACK_WORKSPACE env var (the single source of truth shared with the boot self-heal). Only pass this to register an additional/ad-hoc workspace.",
           },
           signing_secret: {
             type: "string",
@@ -69,7 +77,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "Optional session_id to scope this webhook to the current session — wire purges it the moment the session ends. Default = agent-scoped (persists across sessions).",
           },
         },
-        required: ["workspace"],
+        required: [],
         additionalProperties: false,
       },
     },
@@ -138,48 +146,75 @@ async function wireDelete(path: string): Promise<Response> {
   });
 }
 
+/**
+ * Build + POST a Slack webhook registration to Wire. Shared by the
+ * register_slack_app tool and the on-boot self-heal. Wire's POST is
+ * idempotent (v1.15.0+): if the webhook already exists it returns the
+ * existing record with registered:false and leaves it untouched.
+ */
+async function registerSlackWebhook(opts: {
+  workspace: string;
+  signingSecret: string;
+  filter?: string;
+  sessionId?: string;
+}): Promise<{ webhookId: number; registered: boolean; requestUrl: string; filterSource: string | null }> {
+  // Default to a self-echo filter if the caller didn't supply one and we
+  // have the bot's user id in env. Without this, every agent that posts to
+  // Slack via post_message sees its own message echoed back as an inbound
+  // event — a trap every operator independently rediscovers. Substitute the
+  // user_id literal so the filter sandbox doesn't need process.env access.
+  let filter = opts.filter;
+  let filterSource: string | null = null;
+  if (filter) {
+    filterSource = "caller-supplied";
+  } else if (BOT_USER_ID) {
+    filter = `payload.event?.user !== "${BOT_USER_ID}"`;
+    filterSource = `defaulted to self-echo filter (SLACK_BOT_USER_ID=${BOT_USER_ID})`;
+  }
+
+  const reg = buildSlackWebhook({
+    agentId: AGENT_ID,
+    workspace: opts.workspace,
+    signingSecret: opts.signingSecret,
+    filter,
+    sessionId: opts.sessionId,
+  });
+
+  const wireRes = await wirePost(`/agents/${AGENT_ID}/webhooks`, JSON.stringify(reg.wireBody));
+  if (!wireRes.ok) throw new Error(`Wire registration failed (${wireRes.status}): ${await wireRes.text()}`);
+  const { webhook_id, registered } = (await wireRes.json()) as { webhook_id: number; registered: boolean };
+  return { webhookId: webhook_id, registered, requestUrl: reg.requestUrl(WIRE_EXTERNAL_URL), filterSource };
+}
+
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
   const a = (args ?? {}) as Record<string, unknown>;
 
   try {
     if (name === "register_slack_app") {
+      // Workspace is normally read from SLACK_WORKSPACE (single source of
+      // truth shared with the boot self-heal); an explicit param overrides
+      // it only for ad-hoc/additional registrations.
+      const workspace = (a.workspace as string) || DEFAULT_WORKSPACE;
+      if (!workspace) throw new Error("no workspace — set SLACK_WORKSPACE env (preferred) or pass workspace param");
       const signingSecret = (a.signing_secret as string) || DEFAULT_SIGNING_SECRET;
       if (!signingSecret) throw new Error("no Slack signing secret — set SLACK_SIGNING_SECRET or pass signing_secret param");
 
-      // Default to a self-echo filter if the caller didn't supply one and
-      // we have the bot's user id in env. Without this, every agent that
-      // posts to Slack via post_message sees its own message echoed back as
-      // an inbound event — a trap every operator independently rediscovers.
-      // Substitute the user_id literal so the filter sandbox doesn't need
-      // process.env access.
-      let filter = a.filter as string | undefined;
-      let filterSource: string | null = null;
-      if (filter) {
-        filterSource = "caller-supplied";
-      } else if (BOT_USER_ID) {
-        filter = `payload.event?.user !== "${BOT_USER_ID}"`;
-        filterSource = `defaulted to self-echo filter (SLACK_BOT_USER_ID=${BOT_USER_ID})`;
-      }
-
-      const reg = buildSlackWebhook({
-        agentId: AGENT_ID,
-        workspace: a.workspace as string,
+      const { webhookId, registered, requestUrl, filterSource } = await registerSlackWebhook({
+        workspace,
         signingSecret,
-        filter,
+        filter: a.filter as string | undefined,
         sessionId: a.session_id as string | undefined,
       });
 
-      const wireRes = await wirePost(`/agents/${AGENT_ID}/webhooks`, JSON.stringify(reg.wireBody));
-      if (!wireRes.ok) throw new Error(`Wire registration failed (${wireRes.status}): ${await wireRes.text()}`);
-      const { webhook_id } = (await wireRes.json()) as { webhook_id: number };
-
-      const requestUrl = reg.requestUrl(WIRE_EXTERNAL_URL);
       const filterLine = filterSource ? `\nFilter: ${filterSource}` : "\nFilter: none (pure firehose — set SLACK_BOT_USER_ID env to default a self-echo filter)";
+      const status = registered
+        ? `Slack webhook registered: wire id ${webhookId}`
+        : `Slack webhook already registered (idempotent): wire id ${webhookId} — existing registration left untouched`;
       return {
         content: [{
           type: "text" as const,
-          text: `Slack webhook registered: wire id ${webhook_id}\nRequest URL (paste into api.slack.com → Event Subscriptions): ${requestUrl}${filterLine}`,
+          text: `${status}\nRequest URL (paste into api.slack.com → Event Subscriptions): ${requestUrl}${filterLine}`,
         }],
       };
     }
@@ -242,4 +277,21 @@ export async function startServer(): Promise<void> {
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
   console.error(`[slack] ready (agent=${AGENT_ID})`);
+
+  // Boot self-heal: idempotently ensure our Slack webhook exists, so a
+  // swept/dropped registration (janitor, manual delete, schema migration)
+  // recovers on the next session without a human noticing the firehose went
+  // dark. Wire's POST is idempotent (registered:false → leave untouched).
+  // Best-effort and fire-and-forget — log-only, never block readiness or
+  // throw (an opportunistic boot action must not break the MCP server).
+  if (signingKey && AGENT_ID && DEFAULT_WORKSPACE && DEFAULT_SIGNING_SECRET) {
+    registerSlackWebhook({ workspace: DEFAULT_WORKSPACE, signingSecret: DEFAULT_SIGNING_SECRET })
+      .then(({ webhookId, registered }) =>
+        console.error(`[slack] boot self-heal: webhook ${webhookId} ${registered ? "registered (was missing)" : "already present"} (workspace=${DEFAULT_WORKSPACE})`))
+      .catch((e) => console.error(`[slack] boot self-heal failed (non-fatal): ${(e as Error).message}`));
+  } else if (DEFAULT_WORKSPACE && !signingKey) {
+    console.error("[slack] boot self-heal skipped — SLACK_WORKSPACE set but no AGENT_PRIVATE_KEY for Wire auth");
+  } else if (DEFAULT_WORKSPACE && !DEFAULT_SIGNING_SECRET) {
+    console.error("[slack] boot self-heal skipped — SLACK_WORKSPACE set but no SLACK_SIGNING_SECRET");
+  }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@agiterra/slack-tools",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Slack webhook lifecycle helpers + MCP tools — agent-scoped firehose (1 Slack app per persona), agent-side filtering via webhooks.filter.",
   "type": "module",
   "main": "./src/index.ts",
