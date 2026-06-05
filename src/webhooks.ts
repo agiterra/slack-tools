@@ -39,6 +39,12 @@ export interface SlackWebhookRegistration {
     validator: string;
     responder: string;
     secrets: { signing_secret: string };
+    /** Broker-level idempotency key — drops Slack's http_timeout retries
+     *  (same event_id re-delivered up to 3×) at the broker, not re-fanned. */
+    dedup: string;
+    /** ACK Slack's POST with 200 immediately on receipt, then fan out async,
+     *  so Slack's ~3s retry clock isn't coupled to wire's delivery latency. */
+    ack_early: boolean;
     filter?: string;
     session_id?: string;
   };
@@ -54,6 +60,13 @@ export function buildSlackWebhook(opts: SlackWebhookOptions): SlackWebhookRegist
       validator: buildSlackValidator({ workspace: opts.workspace }),
       responder: buildSlackResponder(),
       secrets: { signing_secret: opts.signingSecret },
+      // Idempotency: Slack's Events API stamps every delivery (incl. retries)
+      // with the same top-level event_id. Keying dedup on it makes the broker
+      // drop http_timeout retries instead of re-fanning them to subscribers.
+      dedup: "payload.event_id",
+      // Decouple Slack's ~3s retry clock from fan-out: ACK 200 on receipt,
+      // deliver async. See wire's ack_early webhook flag.
+      ack_early: true,
       ...(opts.filter ? { filter: opts.filter } : {}),
       ...(opts.sessionId ? { session_id: opts.sessionId } : {}),
     },
