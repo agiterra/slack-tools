@@ -43,7 +43,7 @@ const DEFAULT_BOT_TOKEN = process.env.SLACK_BOT_TOKEN ?? "";
 const DEFAULT_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET ?? "";
 const DEFAULT_WORKSPACE = process.env.SLACK_WORKSPACE ?? "";
 const BOT_USER_ID = process.env.SLACK_BOT_USER_ID ?? "";
-import { credsFor, labeledWorkspaces } from "./creds.js";
+import { credsFor, envSuffix, labeledWorkspaces } from "./creds.js";
 
 let signingKey: CryptoKey | null = null;
 
@@ -65,6 +65,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "Workspace label — used in the URL path and as the event source attribute, e.g. 'mivid-studios'. OMIT under normal circumstances: defaults to the SLACK_WORKSPACE env var (the single source of truth shared with the boot self-heal). Only pass this to register an additional/ad-hoc workspace.",
           },
+          org_name: { type: "string", description: "Human name of the Slack org (e.g. 'Mivid Studios'); stamped as slack_org on every delivery. Defaults to SLACK_ORG_NAME[_<LABEL>] env or the label title-cased." },
+          team_id: { type: "string", description: "Slack team id (T…) to stamp alongside the org name. Defaults to SLACK_TEAM_ID[_<LABEL>] env." },
           signing_secret: {
             type: "string",
             description: "Slack app Signing Secret. Defaults to SLACK_SIGNING_SECRET env var.",
@@ -162,6 +164,9 @@ async function registerSlackWebhook(opts: {
   sessionId?: string;
   /** Bot user id of the app in THIS workspace (self-echo filter). Defaults to the label's SLACK_BOT_USER_ID_<LABEL>, else SLACK_BOT_USER_ID. */
   botUserId?: string;
+  /** Human org name stamped on every delivery (SLACK_ORG_NAME / SLACK_ORG_NAME_<LABEL> env, or the label title-cased). */
+  orgName?: string;
+  teamId?: string;
 }): Promise<{ webhookId: number; registered: boolean; requestUrl: string; filterSource: string | null }> {
   // Default to a self-echo filter if the caller didn't supply one and we
   // have the bot's user id in env. Without this, every agent that posts to
@@ -188,6 +193,8 @@ async function registerSlackWebhook(opts: {
     signingSecret: opts.signingSecret,
     filter,
     sessionId: opts.sessionId,
+    orgName: opts.orgName || process.env[`SLACK_ORG_NAME_${envSuffix(opts.workspace)}`] || (opts.workspace === DEFAULT_WORKSPACE ? process.env.SLACK_ORG_NAME : undefined),
+    teamId: opts.teamId || process.env[`SLACK_TEAM_ID_${envSuffix(opts.workspace)}`] || (opts.workspace === DEFAULT_WORKSPACE ? process.env.SLACK_TEAM_ID : undefined),
   });
 
   const wireRes = await wirePost(`/agents/${AGENT_ID}/webhooks`, JSON.stringify(reg.wireBody));
@@ -215,6 +222,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         signingSecret,
         filter: a.filter as string | undefined,
         sessionId: a.session_id as string | undefined,
+        orgName: a.org_name as string | undefined,
+        teamId: a.team_id as string | undefined,
       });
 
       const filterLine = filterSource ? `\nFilter: ${filterSource}` : "\nFilter: none (pure firehose — set SLACK_BOT_USER_ID env to default a self-echo filter)";

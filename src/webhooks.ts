@@ -29,6 +29,16 @@ export interface SlackWebhookOptions {
    * across sessions; janitor catches strays via heartbeat staleness.
    */
   sessionId?: string;
+  /** Human name of the Slack org (e.g. "Mivid Studios"); the broker stamps it as the first key
+   *  (`slack_org`) of every delivery so a persona with apps in several workspaces never infers
+   *  the org from a URL (Tim, 2026-09-04). Defaults to the label, title-cased. */
+  orgName?: string;
+  /** Slack team id (T…), stamped alongside the org name when known. */
+  teamId?: string;
+}
+
+export function prettyOrgName(label: string): string {
+  return label.split(/[-_\s]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
 }
 
 export interface SlackWebhookRegistration {
@@ -47,6 +57,7 @@ export interface SlackWebhookRegistration {
     ack_early: boolean;
     filter?: string;
     session_id?: string;
+    meta: { slack_org: string; workspace: string; team_id?: string };
   };
   /** The Slack-side Request URL to paste into api.slack.com. */
   requestUrl: (wireExternalUrl: string) => string;
@@ -67,6 +78,7 @@ export function buildSlackWebhook(opts: SlackWebhookOptions): SlackWebhookRegist
       // Decouple Slack's ~3s retry clock from fan-out: ACK 200 on receipt,
       // deliver async. See wire's ack_early webhook flag.
       ack_early: true,
+      meta: { slack_org: opts.orgName ?? prettyOrgName(opts.workspace), workspace: opts.workspace, ...(opts.teamId ? { team_id: opts.teamId } : {}) },
       ...(opts.filter ? { filter: opts.filter } : {}),
       ...(opts.sessionId ? { session_id: opts.sessionId } : {}),
     },

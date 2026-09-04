@@ -18,3 +18,14 @@ describe("credsFor", () => {
   test("envSuffix", () => { expect(envSuffix("mivid-studios")).toBe("MIVID_STUDIOS"); expect(envSuffix(" a.b c ")).toBe("A_B_C"); });
   test("labeledWorkspaces lists every suffixed signing secret", () => { expect(labeledWorkspaces(env)).toEqual(["mivid-studios"]); expect(labeledWorkspaces({})).toEqual([]); });
 });
+
+import { buildSlackWebhook, prettyOrgName } from "./webhooks";
+describe("registration meta.slack_org", () => {
+  test("defaults to the label title-cased; explicit org/team win", () => {
+    expect(prettyOrgName("mivid-studios")).toBe("Mivid Studios");
+    const r = buildSlackWebhook({ agentId: "x", workspace: "fabricaland", signingSecret: "s" });
+    expect(r.wireBody.meta).toEqual({ slack_org: "Fabricaland", workspace: "fabricaland" });
+    const r2 = buildSlackWebhook({ agentId: "x", workspace: "mivid-studios", signingSecret: "s", orgName: "Mivid Studios", teamId: "T011EBY6RUN" });
+    expect(r2.wireBody.meta).toEqual({ slack_org: "Mivid Studios", workspace: "mivid-studios", team_id: "T011EBY6RUN" });
+  });
+});
