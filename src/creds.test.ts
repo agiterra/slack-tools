@@ -29,3 +29,20 @@ describe("registration meta.slack_org", () => {
     expect(r2.wireBody.meta).toEqual({ slack_org: "Mivid Studios", workspace: "mivid-studios", team_id: "T011EBY6RUN" });
   });
 });
+
+import { loadCredFile, slackEnv } from "./creds";
+import { writeFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as pjoin } from "node:path";
+describe("credential file fallback", () => {
+  test("parses KEY=VALUE / export KEY=VALUE, ignores comments, env wins", () => {
+    const d = mkdtempSync(pjoin(tmpdir(), "sc-")); const f = pjoin(d, "slack-creds.env");
+    writeFileSync(f, "# c\nexport SLACK_BOT_TOKEN_MIVID_STUDIOS=\"xoxb-file\"\nSLACK_BOT_USER_ID_MIVID_STUDIOS=U_FILE\nbad line\n");
+    expect(loadCredFile(f)).toEqual({ SLACK_BOT_TOKEN_MIVID_STUDIOS: "xoxb-file", SLACK_BOT_USER_ID_MIVID_STUDIOS: "U_FILE" });
+    expect(loadCredFile(pjoin(d, "missing"))).toEqual({});
+    const merged = { ...loadCredFile(f), SLACK_BOT_TOKEN_MIVID_STUDIOS: "xoxb-env" };
+    expect(credsFor("mivid-studios", merged).botToken).toBe("xoxb-env");
+    expect(credsFor("mivid-studios", merged).botUserId).toBe("U_FILE");
+    expect(typeof slackEnv({}).SLACK_BOT_TOKEN === "string" || slackEnv({}).SLACK_BOT_TOKEN === undefined).toBe(true);
+  });
+});

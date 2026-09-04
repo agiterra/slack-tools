@@ -43,7 +43,7 @@ const DEFAULT_BOT_TOKEN = process.env.SLACK_BOT_TOKEN ?? "";
 const DEFAULT_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET ?? "";
 const DEFAULT_WORKSPACE = process.env.SLACK_WORKSPACE ?? "";
 const BOT_USER_ID = process.env.SLACK_BOT_USER_ID ?? "";
-import { credsFor, envSuffix, labeledWorkspaces } from "./creds.js";
+import { credsFor, envSuffix, labeledWorkspaces, slackEnv } from "./creds.js";
 
 let signingKey: CryptoKey | null = null;
 
@@ -180,7 +180,7 @@ async function registerSlackWebhook(opts: {
   } else {
     // Per-workspace bot user: webhook 99 (brioche/mivid-studios) defaulted to the Fabrica app's
     // id and let every Mivid self-post echo back (2026-09-04).
-    const uid = opts.botUserId || credsFor(opts.workspace, process.env).botUserId || BOT_USER_ID;
+    const uid = opts.botUserId || credsFor(opts.workspace, slackEnv()).botUserId || BOT_USER_ID;
     if (uid) {
       filter = `payload.event?.user !== "${uid}"`;
       filterSource = `defaulted to self-echo filter (bot user ${uid} for workspace ${opts.workspace})`;
@@ -214,7 +214,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       // it only for ad-hoc/additional registrations.
       const workspace = (a.workspace as string) || DEFAULT_WORKSPACE;
       if (!workspace) throw new Error("no workspace — set SLACK_WORKSPACE env (preferred) or pass workspace param");
-      const signingSecret = (a.signing_secret as string) || credsFor(workspace, process.env).signingSecret;
+      const signingSecret = (a.signing_secret as string) || credsFor(workspace, slackEnv()).signingSecret;
       if (!signingSecret) throw new Error(`no Slack signing secret for workspace '${workspace}' — set SLACK_SIGNING_SECRET (default workspace) / SLACK_SIGNING_SECRET_<LABEL>, or pass signing_secret param`);
 
       const { webhookId, registered, requestUrl, filterSource } = await registerSlackWebhook({
@@ -250,7 +250,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     if (name === "post_message") {
-      const botToken = (a.bot_token as string) || credsFor(a.workspace as string | undefined, process.env).botToken;
+      const botToken = (a.bot_token as string) || credsFor(a.workspace as string | undefined, slackEnv()).botToken;
       if (!botToken) throw new Error(`no Slack bot token${a.workspace ? ` for workspace '${a.workspace}' — set SLACK_BOT_TOKEN_${String(a.workspace).toUpperCase().replace(/[^A-Z0-9]+/g, "_")}` : " — set SLACK_BOT_TOKEN"} or pass bot_token param`);
       const result = await postMessage({
         botToken,
@@ -265,7 +265,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     if (name === "add_reaction") {
-      const botToken = (a.bot_token as string) || credsFor(a.workspace as string | undefined, process.env).botToken;
+      const botToken = (a.bot_token as string) || credsFor(a.workspace as string | undefined, slackEnv()).botToken;
       if (!botToken) throw new Error(`no Slack bot token${a.workspace ? ` for workspace '${a.workspace}' — set SLACK_BOT_TOKEN_${String(a.workspace).toUpperCase().replace(/[^A-Z0-9]+/g, "_")}` : " — set SLACK_BOT_TOKEN"} or pass bot_token param`);
       await addReaction(botToken, a.channel as string, a.ts as string, a.name as string);
       return { content: [{ type: "text" as const, text: `reaction :${a.name}: added` }] };
@@ -311,9 +311,9 @@ export async function startServer(): Promise<void> {
   }
   // Labeled workspaces (SLACK_SIGNING_SECRET_<LABEL>): same idempotent self-heal, each with its own bot user id.
   if (signingKey && AGENT_ID) {
-    for (const label of labeledWorkspaces(process.env)) {
+    for (const label of labeledWorkspaces(slackEnv())) {
       if (label === DEFAULT_WORKSPACE) continue;
-      const c = credsFor(label, process.env);
+      const c = credsFor(label, slackEnv());
       registerSlackWebhook({ workspace: label, signingSecret: c.signingSecret, botUserId: c.botUserId })
         .then(({ webhookId, registered }) => console.error(`[slack] boot self-heal: webhook ${webhookId} ${registered ? "registered (was missing)" : "already present"} (workspace=${label})`))
         .catch((e) => console.error(`[slack] boot self-heal failed for ${label} (non-fatal): ${(e as Error).message}`));

@@ -6,6 +6,34 @@
  * (label upper-cased, every non-alphanumeric → "_"). No label, or the default workspace's label,
  * → the unsuffixed vars. Pure: env is a parameter so it is testable.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Credential FILE fallback (Brioche 599603, 2026-09-04): Claude Code's daemon pre-spawns "bg-spare"
+ * sessions with the daemon's own environment, so a var added to ~/.zshenv after the daemon started
+ * never reaches the session or the MCP servers it starts. A file read at CALL time sidesteps that:
+ * `$HOME/.wire/slack-creds.env` (KEY=VALUE lines, `export` prefix tolerated, # comments) — the same
+ * file the channel-names hook reads. process.env wins on conflict. Missing/unreadable file = {}.
+ */
+export function loadCredFile(path: string = join(process.env.HOME ?? "", ".wire", "slack-creds.env")): Record<string, string> {
+  try {
+    const out: Record<string, string> = {};
+    for (const raw of readFileSync(path, "utf8").split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const m = line.replace(/^export\s+/, "").match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
+      if (m) out[m[1]] = m[2].trim().replace(/^["']|["']$/g, "");
+    }
+    return out;
+  } catch { return {}; }
+}
+
+/** process.env layered over the credential file — the env every credsFor() call should use. */
+export function slackEnv(env: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  return { ...loadCredFile(), ...Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined && v !== "")) };
+}
+
 export interface SlackCreds { botToken: string; signingSecret: string; botUserId: string; label: string | null }
 
 export function envSuffix(label: string): string {
