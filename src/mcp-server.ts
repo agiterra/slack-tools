@@ -35,7 +35,7 @@ import {
 import { buildSlackWebhook } from "./webhooks.js";
 import { postMessage, addReaction } from "./api.js";
 import { createAuthJwt, importPrivateKey } from "@agiterra/wire-tools";
-import { payloadProse, steReport, steToolGuidance } from "@agiterra/wire-tools/ste-lint";
+import { steReport, steToolGuidance } from "@agiterra/wire-tools/ste-lint";
 
 const WIRE_URL = process.env.WIRE_URL ?? "http://localhost:9800";
 const WIRE_EXTERNAL_URL = process.env.WIRE_EXTERNAL_URL ?? WIRE_URL;
@@ -53,8 +53,7 @@ let signingKey: CryptoKey | null = null;
  * the blocks, in Slack mode (25-word cap, glossary, hard rules). "" when clean. steReport never throws.
  */
 export function steForSlackPost(text: unknown, blocks: unknown): string {
-  const texts = [text, ...payloadProse(blocks)].filter((t): t is string => typeof t === "string");
-  return steReport(texts, { mode: "slack" });
+  return steReport([text, blocks], { mode: "slack" });
 }
 
 export const POST_MESSAGE_DESCRIPTION =
