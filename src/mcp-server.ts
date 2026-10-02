@@ -35,6 +35,7 @@ import {
 import { buildSlackWebhook } from "./webhooks.js";
 import { postMessage, addReaction } from "./api.js";
 import { createAuthJwt, importPrivateKey } from "@agiterra/wire-tools";
+import { steReport, steToolGuidance } from "@agiterra/wire-tools/ste-lint";
 
 const WIRE_URL = process.env.WIRE_URL ?? "http://localhost:9800";
 const WIRE_EXTERNAL_URL = process.env.WIRE_EXTERNAL_URL ?? WIRE_URL;
@@ -46,6 +47,17 @@ const BOT_USER_ID = process.env.SLACK_BOT_USER_ID ?? "";
 import { credsFor, envSuffix, labeledWorkspaces, slackEnv } from "./creds.js";
 
 let signingKey: CryptoKey | null = null;
+
+/**
+ * AGI-154: the warn-only STE lint post_message appends AFTER the post — the text plus every prose string in
+ * the blocks, in Slack mode (25-word cap, glossary, hard rules). "" when clean. steReport never throws.
+ */
+export function steForSlackPost(text: unknown, blocks: unknown): string {
+  return steReport([text, blocks], { mode: "slack" });
+}
+
+export const POST_MESSAGE_DESCRIPTION =
+  "Post a message to a Slack channel, DM, or thread (chat.postMessage). " + steToolGuidance("slack");
 
 const mcp = new Server(
   { name: "slack", version: "0.1.0" },
@@ -98,7 +110,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "post_message",
-      description: "Post a message to a Slack channel, DM, or thread (chat.postMessage).",
+      description: POST_MESSAGE_DESCRIPTION,
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -259,8 +271,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         threadTs: a.thread_ts as string | undefined,
         blocks: a.blocks as unknown[] | undefined,
       });
+      const ste = steForSlackPost(a.text, a.blocks);
       return {
-        content: [{ type: "text" as const, text: `posted to ${result.channel} ts=${result.ts}` }],
+        content: [{ type: "text" as const, text: `posted to ${result.channel} ts=${result.ts}${ste}` }],
       };
     }
 
